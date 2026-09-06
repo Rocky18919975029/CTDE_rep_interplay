@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harl-prl-research"
+version = "0.1.0"
+description = "Research workspace for predictive representation learning in multi-agent reinforcement learning"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+
+# Benchmark dependencies are intentionally managed by an experiment-specific
+# environment file. MA-MuJoCo, GRF, and Bi-DexHands require incompatible native
+# stacks, so installing one global dependency set here would not be reproducible.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["harl*"]
+
