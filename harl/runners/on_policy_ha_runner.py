@@ -5,6 +5,12 @@ import numpy as np
 import torch
 from harl.utils.trans_tools import _t2n
 from harl.runners.on_policy_base_runner import OnPolicyBaseRunner
+from harl.utils.decomposition_experiment import (
+    ACTOR_ALIGNMENT_MODES,
+    CRITIC_ALIGNMENT_MODES,
+    normalized_alignment_loss,
+    unique_trainable_parameters,
+)
 
 
 class OnPolicyHARunner(OnPolicyBaseRunner):
@@ -214,7 +220,7 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                 actor_train_info = {
                     "policy_loss": 0, "dist_entropy": 0, 
                     "actor_grad_norm": 0, "ratio": 0, "aux_loss": 0,
-                    "action_pred_loss": 0
+                    "action_pred_loss": 0, "alignment_loss": 0
                 }
 
                
@@ -224,7 +230,13 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                     
                     use_aux_loss = self.algo_args["algo"].get("use_aux_loss", False)
                     use_prob_aux_loss = self.algo_args["algo"].get("use_prob_aux_loss", False)
-                    need_target_embed = use_aux_loss or use_prob_aux_loss
+                    use_actor_alignment = (
+                        getattr(self, "alignment_mode", "separate")
+                        in ACTOR_ALIGNMENT_MODES
+                    )
+                    need_target_embed = (
+                        use_aux_loss or use_prob_aux_loss or use_actor_alignment
+                    )
                     
                     use_action_pred = self.algo_args["algo"].get("use_action_pred", False)
 
@@ -238,12 +250,11 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                        
                         share_obs_to_pass = self.critic_buffer.share_obs if need_target_embed else None
 
-                        use_aux_loss = self.algo_args["algo"].get("use_aux_loss", False)
-                        use_prob_aux_loss = self.algo_args["algo"].get("use_prob_aux_loss", False)
-                        need_target_embed = use_aux_loss or use_prob_aux_loss
-
-                       
-                        prl_target = self.algo_args["algo"].get("prl_target", "next")
+                        prl_target = (
+                            "current"
+                            if use_actor_alignment
+                            else self.algo_args["algo"].get("prl_target", "next")
+                        )
                         assert prl_target in ["next", "current"], f"Unsupported prl_target: {prl_target}"
                         
                         if self.actor[agent_id].use_recurrent_policy:
@@ -294,8 +305,19 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                             
                             actor_sample = tuple(current_sample)
                             
-                            policy_loss, dist_entropy, actor_grad_norm, imp_weights, aux_loss, action_pred_loss = self.actor[agent_id].update(
-                                actor_sample, target_embedding, target_joint_actions
+                            legacy_target_embedding = (
+                                target_embedding
+                                if use_aux_loss or use_prob_aux_loss
+                                else None
+                            )
+                            alignment_target = (
+                                target_embedding if use_actor_alignment else None
+                            )
+                            policy_loss, dist_entropy, actor_grad_norm, imp_weights, aux_loss, action_pred_loss, alignment_loss = self.actor[agent_id].update(
+                                actor_sample,
+                                legacy_target_embedding,
+                                target_joint_actions,
+                                alignment_target=alignment_target,
                             )
 
                             actor_train_info["policy_loss"] += policy_loss.item()
@@ -304,6 +326,7 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                             actor_train_info["ratio"] += imp_weights.mean()
                             actor_train_info["aux_loss"] += aux_loss.item() if isinstance(aux_loss, torch.Tensor) else aux_loss
                             actor_train_info["action_pred_loss"] += action_pred_loss.item() if isinstance(action_pred_loss, torch.Tensor) else action_pred_loss
+                            actor_train_info["alignment_loss"] += alignment_loss.item()
 
                     num_updates = ppo_epoch * actor_num_mini_batch
                     for k in actor_train_info.keys():
@@ -342,6 +365,75 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                 actor_train_infos.append(actor_train_info)
 
         
-        critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
+        critic_alignment_actors = (
+            self.actor
+            if getattr(self, "alignment_mode", "separate")
+            in CRITIC_ALIGNMENT_MODES
+            else None
+        )
+        critic_train_info = self.critic.train(
+            self.critic_buffer,
+            self.value_normalizer,
+            alignment_actors=critic_alignment_actors,
+        )
+
+        if getattr(self, "alignment_mode", "separate") == "no_stop":
+            critic_train_info["no_stop_alignment_loss"] = (
+                self._joint_no_stop_alignment_update()
+            )
 
         return actor_train_infos, critic_train_info
+
+    def _joint_no_stop_alignment_update(self):
+        """Run the optional symmetric no-stop-gradient diagnostic update."""
+        share_obs = self.critic_buffer.share_obs[:-1].reshape(
+            -1, *self.critic_buffer.share_obs.shape[2:]
+        )
+        batch_size = share_obs.shape[0]
+        mini_batches = self.algo_args["experiment"].get(
+            "no_stop_num_mini_batch", 1
+        )
+        epochs = self.algo_args["experiment"].get("no_stop_epochs", 1)
+        if mini_batches < 1 or epochs < 1:
+            raise ValueError("no-stop epochs and mini-batches must be positive")
+        normalize = self.algo_args["experiment"].get("alignment_normalize", True)
+        coefficient = self.algo_args["experiment"].get("alignment_coef", 1.0)
+        losses = []
+
+        for _ in range(epochs):
+            permutation = torch.randperm(batch_size).numpy()
+            for indices in np.array_split(permutation, mini_batches):
+                if len(indices) == 0:
+                    continue
+                obs_batch = share_obs[indices]
+                self.critic.critic_optimizer.zero_grad()
+                for actor in self.actor:
+                    actor.actor_optimizer.zero_grad()
+
+                critic_features = self.critic.critic.get_embedding(
+                    obs_batch, None, None
+                )
+                alignment_losses = [
+                    normalized_alignment_loss(
+                        actor.actor.get_encoder_features(obs_batch),
+                        critic_features,
+                        normalize=normalize,
+                    )
+                    for actor in self.actor
+                ]
+                loss = torch.stack(alignment_losses).mean() * coefficient
+                loss.backward()
+
+                if self.algo_args["algo"]["use_max_grad_norm"]:
+                    torch.nn.utils.clip_grad_norm_(
+                        unique_trainable_parameters(
+                            [self.critic.critic]
+                            + [actor.actor for actor in self.actor]
+                        ),
+                        self.algo_args["algo"]["max_grad_norm"],
+                    )
+                self.critic.critic_optimizer.step()
+                for actor in self.actor:
+                    actor.actor_optimizer.step()
+                losses.append(loss.item())
+        return float(np.mean(losses)) if losses else 0.0

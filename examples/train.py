@@ -46,7 +46,7 @@ def main():
         help="Environment name. Choose from: smac, mamujoco, pettingzoo_mpe, gym, football, dexhands, smacv2, lag.",
     )
     parser.add_argument(
-        "--exp_name", type=str, default="installtest", help="Experiment name."
+        "--exp_name", type=str, default=None, help="Experiment name."
     )
     parser.add_argument(
         "--load_config",
@@ -65,17 +65,23 @@ def main():
     keys = [k[2:] for k in unparsed_args[0::2]] 
     values = [process(v) for v in unparsed_args[1::2]]
     unparsed_dict = {k: v for k, v in zip(keys, values)}
-    args = vars(args) 
+    args = vars(args)
+    requested_exp_name = args["exp_name"]
     if args["load_config"] != "": 
         with open(args["load_config"], encoding="utf-8") as file:
             all_config = json.load(file)
         args["algo"] = all_config["main_args"]["algo"]
         args["env"] = all_config["main_args"]["env"]
        
-        args["exp_name"] = all_config["main_args"]["exp_name"] 
+        args["exp_name"] = (
+            requested_exp_name
+            if requested_exp_name is not None
+            else all_config["main_args"]["exp_name"]
+        )
         algo_args = all_config["algo_args"]
         env_args = all_config["env_args"]
     else:  
+        args["exp_name"] = requested_exp_name or "installtest"
         algo_args, env_args = get_defaults_yaml_args(args["algo"], args["env"])
     update_args(unparsed_dict, algo_args, env_args)  
 

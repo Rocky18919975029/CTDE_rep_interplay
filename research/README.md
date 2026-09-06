@@ -19,3 +19,9 @@ Legacy PRL results remain under `/Users/zeshenghong/Downloads/results`; they wer
 not copied into this repository and should be treated as prior exploratory data
 unless their code/environment provenance can be reconstructed.
 
+## Active study
+
+The first study is specified in
+`experiments/humanoid_decomposition_alignment.md`. Its code fixes Humanoid-v2 and
+global information while varying only action decomposition, actor/critic
+interaction, and the declared capacity control.

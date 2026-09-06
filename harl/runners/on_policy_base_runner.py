@@ -25,6 +25,13 @@ from harl.utils.envs_tools import (
 from harl.utils.models_tools import init_device
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
+from harl.utils.decomposition_experiment import (
+    VALID_ALIGNMENT_MODES,
+    count_unique_trainable_parameters,
+    experiment_parameter_count,
+    resolve_parameter_matched_width,
+    unique_trainable_parameters,
+)
 
 
 class OnPolicyBaseRunner:
@@ -40,6 +47,11 @@ class OnPolicyBaseRunner:
         self.args = args
         self.algo_args = algo_args
         self.env_args = env_args
+        self.experiment_config = algo_args.get("experiment", {})
+        self.experiment_enabled = self.experiment_config.get("enabled", False)
+        self.alignment_mode = self.experiment_config.get(
+            "alignment_mode", "separate"
+        )
 
         self.hidden_sizes = algo_args["model"]["hidden_sizes"]
         self.rnn_hidden_size = self.hidden_sizes[-1]
@@ -92,6 +104,8 @@ class OnPolicyBaseRunner:
                 else None
             )
         self.num_agents = get_num_agents(args["env"], env_args, self.envs)
+
+        self._configure_decomposition_experiment()
 
         print("share_observation_space: ", self.envs.share_observation_space)
         print("observation_space: ", self.envs.observation_space)
@@ -151,6 +165,7 @@ class OnPolicyBaseRunner:
                 share_observation_space,
                 device=self.device,
             )
+            self._configure_model_coupling()
             if self.state_type == "EP":
                 self.critic_buffer = OnPolicyCriticBufferEP(
                     {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
@@ -203,6 +218,10 @@ class OnPolicyBaseRunner:
             else:
                 self.value_normalizer = None
 
+            self._record_experiment_parameter_count()
+            if self.experiment_enabled:
+                save_config(args, algo_args, env_args, self.run_dir)
+
             self.logger = LOGGER_REGISTRY[args["env"]](
                 args, algo_args, env_args, self.num_agents, self.writter, self.run_dir
             )
@@ -211,6 +230,171 @@ class OnPolicyBaseRunner:
         self.start_episode = 1
         if self.algo_args["train"]["model_dir"] is not None:  # restore model
             self.restore()
+
+    def _configure_decomposition_experiment(self):
+        """Validate controls and resolve standard or parameter-matched width."""
+        if not self.experiment_enabled:
+            return
+        if self.args["algo"] != "happo" or self.args["env"] != "mamujoco":
+            raise ValueError("The decomposition experiment requires HAPPO on mamujoco")
+        if self.env_args.get("scenario") != "Humanoid-v2":
+            raise ValueError("The decomposition experiment is defined for Humanoid-v2")
+        if self.alignment_mode not in VALID_ALIGNMENT_MODES:
+            raise ValueError(
+                f"Unknown alignment_mode={self.alignment_mode}; "
+                f"choose one of {sorted(VALID_ALIGNMENT_MODES)}"
+            )
+        if self.share_param:
+            raise ValueError("Use share_param=false; hard_share is an explicit mode")
+        if self.state_type != "EP":
+            raise ValueError("The decomposition experiment requires state_type=EP")
+        if self.algo_args["model"].get("use_deep_resnet", False):
+            raise ValueError("The controlled experiment requires the standard MLP base")
+        if self.algo_args["model"].get("use_recurrent_policy", False) or self.algo_args[
+            "model"
+        ].get("use_naive_recurrent_policy", False):
+            raise ValueError("The controlled experiment currently requires feed-forward models")
+        if self.algo_args["algo"].get("use_aux_loss", False) or self.algo_args[
+            "algo"
+        ].get("use_prob_aux_loss", False):
+            raise ValueError("Disable PRL prediction heads for direct latent alignment")
+        if self.algo_args["algo"].get("use_action_pred", False):
+            raise ValueError("Disable action prediction in the controlled experiment")
+        required_env_controls = {
+            "actor_obs_type": "global_state",
+            "canonical_action_order": True,
+            "heterogeneous_action_spaces": True,
+        }
+        for key, expected in required_env_controls.items():
+            if self.env_args.get(key) != expected:
+                raise ValueError(f"Experiment requires env_args.{key}={expected!r}")
+
+        actor_shape = self.envs.observation_space[0].shape
+        critic_shape = self.envs.share_observation_space[0].shape
+        if actor_shape != critic_shape:
+            raise ValueError(
+                f"Actor and critic inputs differ: {actor_shape} versus {critic_shape}"
+            )
+        if any(space.shape != actor_shape for space in self.envs.observation_space):
+            raise ValueError("Every actor must receive the same global-state shape")
+
+        action_dims = [space.shape[0] for space in self.envs.action_space]
+        if sum(action_dims) != 17:
+            raise ValueError(
+                f"Humanoid decompositions must cover 17 actions, got {action_dims}"
+            )
+
+        capacity_mode = self.experiment_config.get("capacity_mode", "standard")
+        if capacity_mode == "standard":
+            hidden_sizes = list(
+                self.experiment_config.get("standard_hidden_sizes", [128, 128, 128])
+            )
+        elif capacity_mode == "matched":
+            depth = self.experiment_config.get("parameter_match_depth", 3)
+            width, _ = resolve_parameter_matched_width(
+                actor_shape[0],
+                action_dims,
+                self.experiment_config.get("parameter_match_target", 1_000_000),
+                depth,
+                hard_share=self.alignment_mode == "hard_share",
+                feature_normalization=self.algo_args["model"].get(
+                    "use_feature_normalization", True
+                ),
+                min_width=self.experiment_config.get("parameter_match_min_width", 8),
+                max_width=self.experiment_config.get("parameter_match_max_width", 2048),
+            )
+            hidden_sizes = [width] * depth
+        else:
+            raise ValueError("capacity_mode must be 'standard' or 'matched'")
+
+        if not hidden_sizes or len(set(hidden_sizes)) != 1:
+            raise ValueError("Experiment MLP hidden sizes must have a uniform width")
+        self.algo_args["model"]["hidden_sizes"] = hidden_sizes
+        self.hidden_sizes = hidden_sizes
+        self.rnn_hidden_size = hidden_sizes[-1]
+
+        # Actor and critic receive these values through the merged algo/model args.
+        self.algo_args["algo"]["alignment_coef"] = self.experiment_config.get(
+            "alignment_coef", 1.0
+        )
+        self.algo_args["algo"]["critic_alignment_coef"] = self.experiment_config.get(
+            "critic_alignment_coef", 1.0
+        )
+        self.algo_args["algo"]["alignment_normalize"] = self.experiment_config.get(
+            "alignment_normalize", True
+        )
+        self.experiment_config["resolved_hidden_sizes"] = hidden_sizes
+        self.experiment_config["resolved_action_dims"] = action_dims
+        self.experiment_config["resolved_global_state_dim"] = actor_shape[0]
+
+    def _configure_model_coupling(self):
+        """Install the single shared encoder and optimizer for hard sharing."""
+        if not self.experiment_enabled or self.alignment_mode != "hard_share":
+            return
+        actor_lr = self.algo_args["model"]["lr"]
+        critic_lr = self.algo_args["model"]["critic_lr"]
+        if actor_lr != critic_lr:
+            raise ValueError("hard_share requires equal actor and critic learning rates")
+
+        shared_base = self.critic.critic.base
+        for actor in self.actor:
+            actor.actor.base = shared_base
+        joint_optimizer = torch.optim.Adam(
+            unique_trainable_parameters(
+                [self.critic.critic] + [actor.actor for actor in self.actor]
+            ),
+            lr=actor_lr,
+            eps=self.algo_args["model"]["opti_eps"],
+            weight_decay=self.algo_args["model"]["weight_decay"],
+        )
+        self.joint_optimizer = joint_optimizer
+        self.critic.critic_optimizer = joint_optimizer
+        for actor in self.actor:
+            actor.actor_optimizer = joint_optimizer
+
+    def _record_experiment_parameter_count(self):
+        if not self.experiment_enabled:
+            return
+        modules = [self.critic.critic] + [actor.actor for actor in self.actor]
+        actual = count_unique_trainable_parameters(modules)
+        width = self.hidden_sizes[0]
+        expected = experiment_parameter_count(
+            self.experiment_config["resolved_global_state_dim"],
+            self.experiment_config["resolved_action_dims"],
+            width,
+            len(self.hidden_sizes),
+            hard_share=self.alignment_mode == "hard_share",
+            feature_normalization=self.algo_args["model"].get(
+                "use_feature_normalization", True
+            ),
+        )
+        if actual != expected:
+            raise RuntimeError(
+                f"Parameter accounting mismatch: model={actual}, formula={expected}"
+            )
+        self.experiment_config["resolved_parameter_count"] = actual
+        self.experiment_config["resolved_parameter_error"] = (
+            actual - self.experiment_config.get("parameter_match_target", actual)
+            if self.experiment_config.get("capacity_mode") == "matched"
+            else 0
+        )
+        print(
+            "decomposition experiment: "
+            f"mode={self.alignment_mode}, agents={self.num_agents}, "
+            f"hidden={self.hidden_sizes}, unique_parameters={actual}"
+        )
+
+    @staticmethod
+    def _pad_and_stack_agent_vectors(vectors):
+        """Stack heterogeneous [batch, dim] vectors using transport-only zeros."""
+        max_dim = max(vector.shape[-1] for vector in vectors)
+        batch_size = vectors[0].shape[0]
+        stacked = np.zeros(
+            (batch_size, len(vectors), max_dim), dtype=vectors[0].dtype
+        )
+        for agent_id, vector in enumerate(vectors):
+            stacked[:, agent_id, : vector.shape[-1]] = vector
+        return stacked
 
     def run(self):
         """Run the training (or rendering) pipeline."""
@@ -441,8 +625,10 @@ class OnPolicyBaseRunner:
                 action_collector.append(_t2n(action))
                 action_log_prob_collector.append(_t2n(action_log_prob))
                 rnn_state_collector.append(_t2n(rnn_state))
-            actions = np.array(action_collector).transpose(1, 0, 2)
-            action_log_probs = np.array(action_log_prob_collector).transpose(1, 0, 2)
+            actions = self._pad_and_stack_agent_vectors(action_collector)
+            action_log_probs = self._pad_and_stack_agent_vectors(
+                action_log_prob_collector
+            )
             rnn_states = np.array(rnn_state_collector).transpose(1, 0, 2, 3)
 
         if self.state_type == "EP":
@@ -508,11 +694,12 @@ class OnPolicyBaseRunner:
             )
 
         for agent_id in range(self.num_agents):
+            action_dim = self.actor_buffer[agent_id].actions.shape[-1]
             self.actor_buffer[agent_id].insert(
                 obs[:, agent_id],
                 rnn_states[:, agent_id],
-                actions[:, agent_id],
-                action_log_probs[:, agent_id],
+                actions[:, agent_id, :action_dim],
+                action_log_probs[:, agent_id, :action_dim],
                 masks[:, agent_id],
                 active_masks[:, agent_id],
                 available_actions[:, agent_id] if available_actions[0] is not None else None,
@@ -615,7 +802,9 @@ class OnPolicyBaseRunner:
                     eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
                     eval_actions_collector.append(_t2n(eval_actions))
 
-                eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+                eval_actions = self._pad_and_stack_agent_vectors(
+                    eval_actions_collector
+                )
 
             (
                 eval_obs,
@@ -713,7 +902,9 @@ class OnPolicyBaseRunner:
                         )
                         eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
                         eval_actions_collector.append(_t2n(eval_actions))
-                    eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+                    eval_actions = self._pad_and_stack_agent_vectors(
+                        eval_actions_collector
+                    )
                     (
                         eval_obs,
                         _,
@@ -767,7 +958,9 @@ class OnPolicyBaseRunner:
                         )
                         eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
                         eval_actions_collector.append(_t2n(eval_actions))
-                    eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+                    eval_actions = self._pad_and_stack_agent_vectors(
+                        eval_actions_collector
+                    )
                     (
                         eval_obs,
                         _,
@@ -819,12 +1012,23 @@ class OnPolicyBaseRunner:
         save_backup_interval = self.algo_args["train"].get("save_backup_interval", 100)
         
        
-        checkpoint = {
-            "episode": episode,
-            "actors": {},
-            "critic_state_dict": self.critic.critic.state_dict(),
-            "critic_optimizer_state_dict": self.critic.critic_optimizer.state_dict()
-        }
+        hard_share = self.experiment_enabled and self.alignment_mode == "hard_share"
+        checkpoint = {"episode": episode, "actors": {}, "hard_share": hard_share}
+        if hard_share:
+            checkpoint["shared_encoder_state_dict"] = self.critic.critic.base.state_dict()
+            checkpoint["critic_head_state_dict"] = {
+                key: value
+                for key, value in self.critic.critic.state_dict().items()
+                if not key.startswith("base.")
+            }
+            checkpoint["joint_optimizer_state_dict"] = (
+                self.joint_optimizer.state_dict()
+            )
+        else:
+            checkpoint["critic_state_dict"] = self.critic.critic.state_dict()
+            checkpoint["critic_optimizer_state_dict"] = (
+                self.critic.critic_optimizer.state_dict()
+            )
        
         if getattr(self, "use_guider", False):
             checkpoint["guider_state_dict"] = self.guider.state_dict()
@@ -832,7 +1036,16 @@ class OnPolicyBaseRunner:
 
         
         for agent_id in range(self.num_agents):
-            checkpoint["actors"][f"agent_{agent_id}"] = self.actor[agent_id].get_checkpoint()
+            if hard_share:
+                checkpoint["actors"][f"agent_{agent_id}"] = {
+                    key: value
+                    for key, value in self.actor[agent_id].actor.state_dict().items()
+                    if not key.startswith("base.")
+                }
+            else:
+                checkpoint["actors"][f"agent_{agent_id}"] = self.actor[
+                    agent_id
+                ].get_checkpoint()
 
       
         if self.value_normalizer is not None:
@@ -848,19 +1061,21 @@ class OnPolicyBaseRunner:
             torch.save(checkpoint, backup_path)
             
        
-        for agent_id in range(self.num_agents):
+        if not hard_share:
+            for agent_id in range(self.num_agents):
+                torch.save(
+                    self.actor[agent_id].actor.state_dict(),
+                    str(self.save_dir) + "/actor_agent" + str(agent_id) + ".pt",
+                )
             torch.save(
-                self.actor[agent_id].actor.state_dict(),
-                str(self.save_dir) + "/actor_agent" + str(agent_id) + ".pt",
+                self.critic.critic.state_dict(),
+                str(self.save_dir) + "/critic_agent" + ".pt",
             )
-        torch.save(
-            self.critic.critic.state_dict(), str(self.save_dir) + "/critic_agent" + ".pt"
-        )
-        if self.value_normalizer is not None:
-            torch.save(
-                self.value_normalizer.state_dict(),
-                str(self.save_dir) + "/value_normalizer" + ".pt",
-            )
+            if self.value_normalizer is not None:
+                torch.save(
+                    self.value_normalizer.state_dict(),
+                    str(self.save_dir) + "/value_normalizer" + ".pt",
+                )
 
    
     def restore(self):
@@ -870,20 +1085,43 @@ class OnPolicyBaseRunner:
         
         latest_path = os.path.join(model_dir, "latest.pt")
         
-        if os.path.exists(latest_path) and not self.algo_args["render"]["use_render"]:
-            print(f"==> Resuming perfectly from {latest_path}")
+        if os.path.exists(latest_path):
+            print(f"==> Loading checkpoint from {latest_path}")
             checkpoint = torch.load(latest_path, map_location=self.device)
-            
-           
-            self.start_episode = checkpoint.get("episode", 0) + 1
-            
-           
-            for agent_id in range(self.num_agents):
-                self.actor[agent_id].load_checkpoint(checkpoint["actors"][f"agent_{agent_id}"])
-                
-           
-            self.critic.critic.load_state_dict(checkpoint["critic_state_dict"])
-            self.critic.critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+            rendering = self.algo_args["render"]["use_render"]
+            if not rendering:
+                self.start_episode = checkpoint.get("episode", 0) + 1
+
+            if checkpoint.get("hard_share", False):
+                for actor in self.actor:
+                    actor.actor.base.load_state_dict(
+                        checkpoint["shared_encoder_state_dict"]
+                    )
+                for agent_id in range(self.num_agents):
+                    self.actor[agent_id].actor.load_state_dict(
+                        checkpoint["actors"][f"agent_{agent_id}"], strict=False
+                    )
+                if not rendering:
+                    self.critic.critic.load_state_dict(
+                        checkpoint["critic_head_state_dict"], strict=False
+                    )
+                    self.joint_optimizer.load_state_dict(
+                        checkpoint["joint_optimizer_state_dict"]
+                    )
+            else:
+                for agent_id in range(self.num_agents):
+                    actor_checkpoint = checkpoint["actors"][f"agent_{agent_id}"]
+                    if rendering:
+                        self.actor[agent_id].actor.load_state_dict(
+                            actor_checkpoint["actor_state_dict"]
+                        )
+                    else:
+                        self.actor[agent_id].load_checkpoint(actor_checkpoint)
+                if not rendering:
+                    self.critic.critic.load_state_dict(checkpoint["critic_state_dict"])
+                    self.critic.critic_optimizer.load_state_dict(
+                        checkpoint["critic_optimizer_state_dict"]
+                    )
 
            
             if getattr(self, "use_guider", False) and "guider_state_dict" in checkpoint:
@@ -891,7 +1129,7 @@ class OnPolicyBaseRunner:
                 self.guider_optimizer.load_state_dict(checkpoint["guider_optimizer_state_dict"])
             
            
-            if self.value_normalizer is not None and "value_normalizer_state_dict" in checkpoint:
+            if getattr(self, "value_normalizer", None) is not None and "value_normalizer_state_dict" in checkpoint:
                 self.value_normalizer.load_state_dict(checkpoint["value_normalizer_state_dict"])
                 
         else:

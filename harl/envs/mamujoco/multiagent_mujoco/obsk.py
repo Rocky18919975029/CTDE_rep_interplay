@@ -175,10 +175,41 @@ def build_obs(env, k_dict, k_categories, global_dict, global_categories, vec_len
     return np.array(obs_lst)
 
 
-def build_actions(agent_partitions, k_dict):
-    # Composes agent actions output from networks
-    # into coherent joint action vector to be sent to the env.
-    pass
+def build_actions(agent_partitions, actions):
+    """Compose per-agent actions in MuJoCo's canonical actuator order.
+
+    A partition is allowed to list joints in any anatomical order.  Concatenating
+    the policy outputs would therefore change the physical control problem when
+    the decomposition changes.  ``Node.act_ids`` is the invariant mapping back
+    to the original MuJoCo action vector.
+    """
+    actuator_ids = [
+        node.act_ids for partition in agent_partitions for node in partition
+    ]
+    if not actuator_ids or any(not isinstance(act_id, int) or act_id < 0 for act_id in actuator_ids):
+        raise ValueError("Every controlled node must have one non-negative act_id")
+    if len(set(actuator_ids)) != len(actuator_ids):
+        raise ValueError("Agent partitions assign at least one actuator more than once")
+
+    expected_ids = set(range(max(actuator_ids) + 1))
+    if set(actuator_ids) != expected_ids:
+        raise ValueError(
+            "Agent partitions must cover every actuator exactly once; "
+            f"got {sorted(actuator_ids)}"
+        )
+
+    first_action = np.asarray(actions[0])
+    flat_actions = np.zeros(max(actuator_ids) + 1, dtype=first_action.dtype)
+    for agent_id, partition in enumerate(agent_partitions):
+        agent_actions = np.asarray(actions[agent_id]).reshape(-1)
+        if agent_actions.size < len(partition):
+            raise ValueError(
+                f"Agent {agent_id} produced {agent_actions.size} actions for "
+                f"a {len(partition)}-actuator partition"
+            )
+        for local_id, node in enumerate(partition):
+            flat_actions[node.act_ids] = agent_actions[local_id]
+    return flat_actions
 
 
 def get_parts_and_edges(label, partitioning):
@@ -466,9 +497,78 @@ def get_parts_and_edges(label, partitioning):
 
         globals = {}
 
-        if (
+        # The experiment partitions form a strictly nested refinement lattice:
+        # 1 -> 3 -> 5 -> 7 -> 11 -> 17 agents.  Thus increasing granularity only
+        # splits an existing anatomical group; it never moves a joint between two
+        # otherwise unchanged groups.
+        core = (abdomen_x, abdomen_y, abdomen_z)
+        right_hip = (right_hip_x, right_hip_y, right_hip_z)
+        left_hip = (left_hip_x, left_hip_y, left_hip_z)
+        right_leg = right_hip + (right_knee,)
+        left_leg = left_hip + (left_knee,)
+        right_shoulder = (right_shoulder1, right_shoulder2)
+        left_shoulder = (left_shoulder1, left_shoulder2)
+        right_arm = right_shoulder + (right_elbow,)
+        left_arm = left_shoulder + (left_elbow,)
+        upper_body = right_arm + left_arm
+        lower_body = right_leg + left_leg
+
+        if partitioning in ["1agent", "1x17"]:
+            parts = (core + lower_body + upper_body,)
+        elif partitioning == "3agents":
+            parts = (core, lower_body, upper_body)
+        elif partitioning == "5agents":
+            parts = (core, right_leg, left_leg, right_arm, left_arm)
+        elif partitioning == "7agents":
+            parts = (
+                core,
+                right_hip,
+                (right_knee,),
+                left_hip,
+                (left_knee,),
+                right_arm,
+                left_arm,
+            )
+        elif partitioning == "11agents":
+            parts = (
+                (abdomen_x,),
+                (abdomen_y,),
+                (abdomen_z,),
+                right_hip,
+                (right_knee,),
+                left_hip,
+                (left_knee,),
+                right_shoulder,
+                (right_elbow,),
+                left_shoulder,
+                (left_elbow,),
+            )
+        elif partitioning == "17agents":
+            parts = tuple(
+                (node,)
+                for node in (
+                    abdomen_x,
+                    abdomen_y,
+                    abdomen_z,
+                    right_hip_x,
+                    right_hip_y,
+                    right_hip_z,
+                    right_knee,
+                    left_hip_x,
+                    left_hip_y,
+                    left_hip_z,
+                    left_knee,
+                    right_shoulder1,
+                    right_shoulder2,
+                    right_elbow,
+                    left_shoulder1,
+                    left_shoulder2,
+                    left_elbow,
+                )
+            )
+        elif (
             partitioning == "9|8"
-        ):  # 17 in total, so one action is a dummy (to be handled by pymarl)
+        ):  # legacy two-agent partition
             # isolate upper and lower body
             parts = [
                 (
@@ -494,10 +594,7 @@ def get_parts_and_edges(label, partitioning):
                 ),
             ]
             # TODO: There could be tons of decompositions here
-        elif (
-            partitioning == "17x1"
-        ):  # 17 in total, so one action is a dummy (to be handled by pymarl)
-            # isolate upper and lower body
+        elif partitioning in ["17x1", "17x1_legacy"]:
             parts = [
                 (left_shoulder1,),
                 (left_shoulder2,),

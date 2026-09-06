@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from harl.utils.envs_tools import check
 from harl.utils.models_tools import get_grad_norm
 from harl.algorithms.actors.on_policy_base import OnPolicyBase
+from harl.utils.decomposition_experiment import normalized_alignment_loss
 
 
 class HAPPO(OnPolicyBase):
@@ -32,7 +33,13 @@ class HAPPO(OnPolicyBase):
         self.aux_loss_coef = args.get("aux_loss_coef", 1.0)
 
    
-    def update(self, sample, target_embedding=None, target_joint_actions=None):
+    def update(
+        self,
+        sample,
+        target_embedding=None,
+        target_joint_actions=None,
+        alignment_target=None,
+    ):
         """Update actor network.
         Args:
             sample: (Tuple) contains data batch with which to update networks.
@@ -146,8 +153,26 @@ class HAPPO(OnPolicyBase):
                 action_pred_loss = F.mse_loss(predicted_joint_actions, target_joint_actions.detach())
 
         action_pred_coef = self.args.get("action_pred_coef", 1.0)
+
+        alignment_loss = torch.tensor(0.0).to(**self.tpdv)
+        if alignment_target is not None:
+            actor_features = self.actor.get_encoder_features(obs_batch)
+            alignment_target = check(alignment_target).to(**self.tpdv).detach()
+            alignment_loss = normalized_alignment_loss(
+                actor_features,
+                alignment_target,
+                active_masks_batch if self.use_policy_active_masks else None,
+                normalize=self.args.get("alignment_normalize", True),
+            )
+        alignment_coef = self.args.get("alignment_coef", 1.0)
         
-        loss = policy_action_loss - dist_entropy * self.entropy_coef + aux_loss * self.aux_loss_coef + action_pred_loss * action_pred_coef
+        loss = (
+            policy_action_loss
+            - dist_entropy * self.entropy_coef
+            + aux_loss * self.aux_loss_coef
+            + action_pred_loss * action_pred_coef
+            + alignment_loss * alignment_coef
+        )
 
         self.actor_optimizer.zero_grad()
 
@@ -169,7 +194,15 @@ class HAPPO(OnPolicyBase):
 
         self.actor_optimizer.step()
 
-        return policy_action_loss, dist_entropy, actor_grad_norm, imp_weights, aux_loss, action_pred_loss
+        return (
+            policy_action_loss,
+            dist_entropy,
+            actor_grad_norm,
+            imp_weights,
+            aux_loss,
+            action_pred_loss,
+            alignment_loss,
+        )
 
     
     def train(self, actor_buffer, advantages, state_type):
@@ -185,6 +218,7 @@ class HAPPO(OnPolicyBase):
         train_info["actor_grad_norm"] = 0
         train_info["ratio"] = 0
         train_info["aux_loss"] = 0
+        train_info["alignment_loss"] = 0
 
         if np.all(actor_buffer.active_masks[:-1] == 0.0):
             return train_info
@@ -212,7 +246,7 @@ class HAPPO(OnPolicyBase):
 
             for sample in data_generator:
                
-                policy_loss, dist_entropy, actor_grad_norm, imp_weights, aux_loss, action_pred_loss = self.update(
+                policy_loss, dist_entropy, actor_grad_norm, imp_weights, aux_loss, action_pred_loss, alignment_loss = self.update(
                     sample, target_embedding=None, target_joint_actions=None
                 )
 
@@ -221,6 +255,7 @@ class HAPPO(OnPolicyBase):
                 train_info["actor_grad_norm"] += actor_grad_norm
                 train_info["ratio"] += imp_weights.mean()
                 train_info["aux_loss"] += aux_loss.item() if isinstance(aux_loss, torch.Tensor) else aux_loss
+                train_info["alignment_loss"] += alignment_loss.item()
                 
                 train_info["action_pred_loss"] = train_info.get("action_pred_loss", 0) + (action_pred_loss.item() if isinstance(action_pred_loss, torch.Tensor) else action_pred_loss)
 

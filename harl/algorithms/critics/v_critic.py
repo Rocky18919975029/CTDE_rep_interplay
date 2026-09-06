@@ -11,6 +11,7 @@ from harl.utils.models_tools import (
 )
 from harl.utils.envs_tools import check
 from harl.models.value_function_models.v_net import VNet
+from harl.utils.decomposition_experiment import normalized_alignment_loss
 
 
 class VCritic:
@@ -115,7 +116,7 @@ class VCritic:
 
         return value_loss
 
-    def update(self, sample, value_normalizer=None):
+    def update(self, sample, value_normalizer=None, alignment_actors=None):
         """Update critic network.
         Args:
             sample: (Tuple) contains data batch with which to update networks.
@@ -143,9 +144,32 @@ class VCritic:
             values, value_preds_batch, return_batch, value_normalizer=value_normalizer
         )
 
+        alignment_loss = torch.tensor(0.0).to(**self.tpdv)
+        if alignment_actors:
+            critic_features = self.critic.get_embedding(
+                share_obs_batch, rnn_states_critic_batch, masks_batch
+            )
+            per_actor_losses = []
+            with torch.no_grad():
+                actor_targets = [
+                    actor.actor.get_encoder_features(share_obs_batch)
+                    for actor in alignment_actors
+                ]
+            for actor_target in actor_targets:
+                per_actor_losses.append(
+                    normalized_alignment_loss(
+                        critic_features,
+                        actor_target.detach(),
+                        normalize=self.args.get("alignment_normalize", True),
+                    )
+                )
+            alignment_loss = torch.stack(per_actor_losses).mean()
+
         self.critic_optimizer.zero_grad()
 
-        (value_loss * self.value_loss_coef).backward()
+        total_loss = value_loss * self.value_loss_coef
+        total_loss += alignment_loss * self.args.get("critic_alignment_coef", 1.0)
+        total_loss.backward()
 
         if self.use_max_grad_norm:
             critic_grad_norm = nn.utils.clip_grad_norm_(
@@ -156,9 +180,9 @@ class VCritic:
 
         self.critic_optimizer.step()
 
-        return value_loss, critic_grad_norm
+        return value_loss, critic_grad_norm, alignment_loss
 
-    def train(self, critic_buffer, value_normalizer=None):
+    def train(self, critic_buffer, value_normalizer=None, alignment_actors=None):
         """Perform a training update using minibatch GD.
         Args:
             critic_buffer: (OnPolicyCriticBufferEP or OnPolicyCriticBufferFP) buffer containing training data related to critic.
@@ -171,6 +195,7 @@ class VCritic:
 
         train_info["value_loss"] = 0
         train_info["critic_grad_norm"] = 0
+        train_info["alignment_loss"] = 0
 
         for _ in range(self.critic_epoch):
             if self.use_recurrent_policy:
@@ -187,12 +212,15 @@ class VCritic:
                 )
 
             for sample in data_generator:
-                value_loss, critic_grad_norm = self.update(
-                    sample, value_normalizer=value_normalizer
+                value_loss, critic_grad_norm, alignment_loss = self.update(
+                    sample,
+                    value_normalizer=value_normalizer,
+                    alignment_actors=alignment_actors,
                 )
 
                 train_info["value_loss"] += value_loss.item()
                 train_info["critic_grad_norm"] += critic_grad_norm
+                train_info["alignment_loss"] += alignment_loss.item()
 
         num_updates = self.critic_epoch * self.critic_num_mini_batch
 

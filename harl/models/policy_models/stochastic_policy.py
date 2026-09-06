@@ -88,17 +88,6 @@ class StochasticPolicy(nn.Module):
                 combined_dim = self.hidden_sizes[-1] + self.target_embed_dim
             else:
                 combined_dim = self.hidden_sizes[-1]
-        # 👇【新增这段 TAPPO 专属逻辑】👇
-        elif getattr(self, "use_action_pred", False):
-            predicted_joint_actions = self.action_pred_head(actor_features)
-            if getattr(self, "condition_on_pred", False):
-                # 将队友动作的预测结果（Detach防爆）作为额外条件拼接给策略
-                detached_pred = predicted_joint_actions.detach()
-                normalized_pred = F.layer_norm(detached_pred,[detached_pred.shape[-1]])
-                combined_features = torch.cat([actor_features, normalized_pred], dim=-1)
-            else:
-                combined_features = actor_features
-        # 👆【新增结束】👆        
         else:
             combined_dim = self.hidden_sizes[-1]
         
@@ -120,6 +109,19 @@ class StochasticPolicy(nn.Module):
         )
 
         self.to(device)
+
+    def get_encoder_features(self, obs):
+        """Return the pre-head encoder representation used for alignment.
+
+        The decomposition experiment is deliberately feed-forward, so this is
+        exactly comparable to the critic-side ``base`` representation.
+        """
+        obs = check(obs).to(**self.tpdv)
+        if self.use_naive_recurrent_policy or self.use_recurrent_policy:
+            raise RuntimeError(
+                "Direct encoder alignment currently requires feed-forward policies"
+            )
+        return self.base(obs)
 
     def forward(
         self, obs, rnn_states, masks, available_actions=None, deterministic=False

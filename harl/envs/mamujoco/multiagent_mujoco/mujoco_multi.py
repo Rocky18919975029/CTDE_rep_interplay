@@ -6,7 +6,7 @@ import numpy as np
 
 from .multiagentenv import MultiAgentEnv
 from .manyagent_swimmer import ManyAgentSwimmerEnv
-from .obsk import get_joints_at_kdist, get_parts_and_edges, build_obs
+from .obsk import get_joints_at_kdist, get_parts_and_edges, build_actions, build_obs
 
 
 def env_fn(env, **kwargs) -> MultiAgentEnv:  # TODO: this may be a more complex function
@@ -41,6 +41,17 @@ class MujocoMulti(MultiAgentEnv):
         super().__init__(batch_size, **kwargs)
         self.scenario = kwargs["env_args"]["scenario"]  # e.g. Ant-v2
         self.agent_conf = kwargs["env_args"]["agent_conf"]  # e.g. '2x3'
+        self.actor_obs_type = kwargs["env_args"].get("actor_obs_type", "legacy")
+        self.canonical_action_order = kwargs["env_args"].get(
+            "canonical_action_order", False
+        )
+        self.heterogeneous_action_spaces = kwargs["env_args"].get(
+            "heterogeneous_action_spaces", False
+        )
+        if self.actor_obs_type not in ["legacy", "global_state"]:
+            raise ValueError(
+                "actor_obs_type must be either 'legacy' or 'global_state'"
+            )
 
         (
             self.agent_partitions,
@@ -135,35 +146,49 @@ class MujocoMulti(MultiAgentEnv):
         ]
 
         acdims = [len(ap) for ap in self.agent_partitions]
-        self.action_space = tuple(
-            [
+        if self.canonical_action_order:
+            self.true_action_space = tuple(
                 Box(
-                    self.env.action_space.low[sum(acdims[:0]) : sum(acdims[: 1])],
-                    self.env.action_space.high[sum(acdims[:0]) : sum(acdims[: 1])],
+                    self.env.action_space.low[[node.act_ids for node in partition]],
+                    self.env.action_space.high[[node.act_ids for node in partition]],
                 )
-                for a in range(self.n_agents)
-            ]
-        )
-        self.true_action_space = tuple(
-            [
+                for partition in self.agent_partitions
+            )
+        else:
+            self.true_action_space = tuple(
                 Box(
                     self.env.action_space.low[sum(acdims[:a]) : sum(acdims[: a + 1])],
                     self.env.action_space.high[sum(acdims[:a]) : sum(acdims[: a + 1])],
                 )
                 for a in range(self.n_agents)
-            ]
-        )
+            )
+        if self.heterogeneous_action_spaces:
+            self.action_space = self.true_action_space
+        else:
+            # Legacy behavior: every policy uses the first partition's size and
+            # the environment discards dummy coordinates for smaller partitions.
+            max_action_dim = acdims[0]
+            self.action_space = tuple(
+                Box(
+                    self.env.action_space.low[:max_action_dim],
+                    self.env.action_space.high[:max_action_dim],
+                )
+                for _ in range(self.n_agents)
+            )
 
         pass
 
     def step(self, actions):
-        # need to remove dummy actions that arise due to unequal action vector sizes across agents
-        flat_actions = np.concatenate(
-            [
-                actions[i][: self.true_action_space[i].low.shape[0]]
-                for i in range(self.n_agents)
-            ]
-        )
+        if self.canonical_action_order:
+            flat_actions = build_actions(self.agent_partitions, actions)
+        else:
+            # Remove dummy actions that arise due to unequal legacy spaces.
+            flat_actions = np.concatenate(
+                [
+                    actions[i][: self.true_action_space[i].low.shape[0]]
+                    for i in range(self.n_agents)
+                ]
+            )
         obs_n, reward_n, done_n, info_n = self.wrapped_env.step(flat_actions)
         self.steps += 1
 
@@ -198,6 +223,10 @@ class MujocoMulti(MultiAgentEnv):
 
     def get_obs(self):
         """Returns all agent observat3ions in a list"""
+        if self.actor_obs_type == "global_state":
+            state = self._get_normalized_global_state()
+            return [state.copy() for _ in range(self.n_agents)]
+
         state = self.env._get_obs()
         obs_n = []
         for a in range(self.n_agents):
@@ -231,6 +260,8 @@ class MujocoMulti(MultiAgentEnv):
 
     def get_obs_size(self):
         """Returns the shape of the observation"""
+        if self.actor_obs_type == "global_state":
+            return self.get_state_size()
         if self.agent_obsk is None:
             return self.get_obs_agent(0).size
         else:
@@ -239,12 +270,16 @@ class MujocoMulti(MultiAgentEnv):
 
     def get_state(self, team=None):
         # TODO: May want global states for different teams (so cannot see what the other team is communicating e.g.)
-        state = self.env._get_obs()
-        state_normed = (state - np.mean(state)) / np.std(state)
+        state_normed = self._get_normalized_global_state()
         share_obs = []
         for a in range(self.n_agents):
             share_obs.append(state_normed)
         return share_obs
+
+    def _get_normalized_global_state(self):
+        state = self.env._get_obs()
+        std = np.std(state)
+        return (state - np.mean(state)) / max(std, 1e-8)
 
     def get_state_size(self):
         """Returns the shape of the state"""
