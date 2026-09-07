@@ -117,3 +117,36 @@ tmux new-session -d -s humanoid-s1-c2a \
 ```
 
 Per-process stdout/stderr is written under `launch_logs/`.
+
+## Live eight-panel reward monitor
+
+The live monitor reads HARL's flushed `progress.txt` for the newest matching run
+of every decomposition. In `auto` mode it plots evaluation episode return as
+soon as it exists, and reads TensorBoard's training-return event as an explicit
+fallback before the first evaluation interval.
+
+Install the two plotting dependencies in the experiment environment if needed,
+then start the localhost-only web view in a second `tmux` session:
+
+```bash
+python -m pip install matplotlib tensorboard
+
+tmux new-session -d -s humanoid-rewards \
+  'cd ~/CTDE_rep_interplay && conda run -n marl_trpo \
+   python scripts/live_plot_humanoid_rewards.py \
+   --seed 1 --alignment-mode critic_to_actor --capacity-mode standard \
+   --refresh-seconds 10 --port 8765'
+```
+
+On the local computer, forward the monitor port and open
+`http://127.0.0.1:8765`:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 zeshenghong@ada4090g1
+```
+
+Use `--metric eval` to keep panels blank until evaluation results arrive,
+`--metric train` for training returns only, or `--x-axis hours` for elapsed
+wall-clock time instead of environment steps. To create or continually update a
+PNG file, pass `--output results/humanoid_rewards_live.png`; add `--once` to
+write it once and exit.
