@@ -28,6 +28,28 @@ METRIC_TAGS = {
     "train": "train_episode_rewards",
 }
 
+METHOD_STYLES = {
+    "separate": {
+        "label": "HAPPO baseline",
+        "short_label": "baseline",
+        "color": "tab:orange",
+    },
+    "critic_to_actor": {
+        "label": "Critic-to-actor",
+        "short_label": "C2A",
+        "color": "tab:blue",
+    },
+}
+
+ALIGNMENT_MODES = (
+    "separate",
+    "hard_share",
+    "critic_to_actor",
+    "actor_to_critic",
+    "bidirectional",
+    "no_stop",
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -43,13 +65,25 @@ def parse_args():
         help="common HARL result root (default: %(default)s)",
     )
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--alignment-mode", default="critic_to_actor")
+    parser.add_argument(
+        "--alignment-modes",
+        nargs="+",
+        choices=ALIGNMENT_MODES,
+        default=("separate", "critic_to_actor"),
+        help="methods to overlay in every panel (default: separate critic_to_actor)",
+    )
+    parser.add_argument(
+        "--alignment-mode",
+        choices=ALIGNMENT_MODES,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--capacity-mode", default="standard")
     parser.add_argument(
         "--metric",
         choices=("auto", "eval", "train"),
-        default="auto",
-        help="auto uses evaluation return when available, otherwise training return",
+        default="eval",
+        help="reward source; auto falls back to training return (default: eval)",
     )
     parser.add_argument(
         "--x-axis",
@@ -84,6 +118,9 @@ def parse_args():
         parser.error("--smooth-window must be positive")
     if args.once and args.output is None:
         parser.error("--once requires --output")
+    # Backward compatibility with commands issued before multi-method plotting.
+    if args.alignment_mode is not None:
+        args.alignment_modes = (args.alignment_mode,)
     return args
 
 
@@ -182,17 +219,18 @@ def read_eval_progress(path):
     ], errors
 
 
-def load_decomposition(args, decomposition):
+def load_decomposition(args, decomposition, alignment_mode):
     run_dir = find_latest_run(
         args.results_dir,
         decomposition,
         args.seed,
-        args.alignment_mode,
+        alignment_mode,
         args.capacity_mode,
     )
     if run_dir is None:
         return {
             "decomposition": decomposition,
+            "alignment_mode": alignment_mode,
             "run_dir": None,
             "metric": None,
             "points": [],
@@ -216,6 +254,7 @@ def load_decomposition(args, decomposition):
             break
     return {
         "decomposition": decomposition,
+        "alignment_mode": alignment_mode,
         "run_dir": run_dir,
         "metric": selected_metric,
         "points": points,
@@ -236,6 +275,18 @@ def moving_average(values, window):
     return result
 
 
+def method_style(alignment_mode, index):
+    if alignment_mode in METHOD_STYLES:
+        return METHOD_STYLES[alignment_mode]
+    colors = ("tab:green", "tab:red", "tab:purple", "tab:brown")
+    label = alignment_mode.replace("_", " ")
+    return {
+        "label": label,
+        "short_label": label,
+        "color": colors[index % len(colors)],
+    }
+
+
 def render_plot(args):
     # Keep the monitor usable on headless training servers.
     import matplotlib
@@ -243,7 +294,13 @@ def render_plot(args):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    series = [load_decomposition(args, item) for item in DECOMPOSITIONS]
+    series = {
+        decomposition: [
+            load_decomposition(args, decomposition, alignment_mode)
+            for alignment_mode in args.alignment_modes
+        ]
+        for decomposition in DECOMPOSITIONS
+    }
     figure, axes = plt.subplots(
         2,
         4,
@@ -253,26 +310,103 @@ def render_plot(args):
     )
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     figure.suptitle(
-        "Humanoid reward monitor | seed={} | {} | {} | updated {}".format(
-            args.seed, args.alignment_mode, args.capacity_mode, now
+        "Humanoid reward monitor | seed={} | {} | updated {}".format(
+            args.seed, args.capacity_mode, now
         ),
         fontsize=14,
     )
 
-    for index, (axis, item) in enumerate(zip(axes.flat, series)):
-        points = item["points"]
-        metric = item["metric"]
+    from matplotlib.lines import Line2D
+
+    legend_handles = []
+    for mode_index, alignment_mode in enumerate(args.alignment_modes):
+        style = method_style(alignment_mode, mode_index)
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=style["color"],
+                linewidth=2.4,
+                label=style["label"],
+            )
+        )
+    figure.legend(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.955),
+        ncol=max(1, len(legend_handles)),
+        frameon=False,
+    )
+
+    for index, (axis, decomposition) in enumerate(zip(axes.flat, DECOMPOSITIONS)):
+        items = series[decomposition]
         axis.grid(True, alpha=0.25, linewidth=0.7)
-        axis.set_title(item["decomposition"], fontweight="bold")
-        if not points:
-            if item["run_dir"] is None:
-                status = "matching run not found"
+        axis.set_title(decomposition, fontweight="bold")
+        status_lines = []
+        has_points = False
+
+        for mode_index, item in enumerate(items):
+            alignment_mode = item["alignment_mode"]
+            style = method_style(alignment_mode, mode_index)
+            points = item["points"]
+            metric = item["metric"]
+            if not points:
+                if item["run_dir"] is None:
+                    state = "run not found"
+                else:
+                    state = "waiting for {}".format(metric)
+                status_lines.append("{}: {}".format(style["short_label"], state))
+                continue
+
+            has_points = True
+            steps = [point[0] for point in points]
+            wall_times = [point[1] for point in points]
+            rewards = [point[2] for point in points]
+            if args.x_axis == "hours":
+                first_wall_time = wall_times[0]
+                x_values = [
+                    (value - first_wall_time) / 3600.0 for value in wall_times
+                ]
             else:
-                status = "waiting for {} reward".format(metric)
+                x_values = [step / 1_000_000.0 for step in steps]
+
+            axis.plot(
+                x_values,
+                rewards,
+                color=style["color"],
+                alpha=0.20,
+                linewidth=1.0,
+            )
+            smoothed = moving_average(rewards, args.smooth_window)
+            axis.plot(
+                x_values,
+                smoothed,
+                color=style["color"],
+                linewidth=2.2,
+            )
+            axis.scatter(
+                [x_values[-1]],
+                [rewards[-1]],
+                color=style["color"],
+                s=18,
+                zorder=3,
+            )
+            metric_label = "eval" if metric == "eval" else "train"
+            status_lines.append(
+                "{}: {} n={} last={:.1f} step={:,}".format(
+                    style["short_label"],
+                    metric_label,
+                    len(points),
+                    rewards[-1],
+                    steps[-1],
+                )
+            )
+
+        if not has_points:
             axis.text(
                 0.5,
                 0.5,
-                status,
+                "\n".join(status_lines),
                 ha="center",
                 va="center",
                 transform=axis.transAxes,
@@ -281,41 +415,23 @@ def render_plot(args):
             axis.set_xticks([])
             if args.independent_y:
                 axis.set_yticks([])
-            continue
-
-        steps = [point[0] for point in points]
-        wall_times = [point[1] for point in points]
-        rewards = [point[2] for point in points]
-        if args.x_axis == "hours":
-            first_wall_time = wall_times[0]
-            x_values = [(value - first_wall_time) / 3600.0 for value in wall_times]
         else:
-            x_values = steps
-            axis.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
-
-        axis.plot(x_values, rewards, color="tab:blue", alpha=0.28, linewidth=1.0)
-        smoothed = moving_average(rewards, args.smooth_window)
-        axis.plot(x_values, smoothed, color="tab:blue", linewidth=2.0)
-        axis.scatter(
-            [x_values[-1]], [rewards[-1]], color="tab:blue", s=18, zorder=3
-        )
-        metric_label = "eval" if metric == "eval" else "train fallback"
-        axis.text(
-            0.02,
-            0.98,
-            "{} | n={} | last={:.2f}\nstep={:,}".format(
-                metric_label, len(points), rewards[-1], steps[-1]
-            ),
-            ha="left",
-            va="top",
-            transform=axis.transAxes,
-            fontsize=9,
-        )
+            axis.text(
+                0.02,
+                0.98,
+                "\n".join(status_lines),
+                ha="left",
+                va="top",
+                transform=axis.transAxes,
+                fontsize=8.2,
+            )
         if index % 4 == 0:
             axis.set_ylabel("Episode return")
         if index >= 4:
             axis.set_xlabel(
-                "Elapsed hours" if args.x_axis == "hours" else "Environment steps"
+                "Elapsed hours"
+                if args.x_axis == "hours"
+                else "Environment steps (millions)"
             )
 
     buffer = io.BytesIO()
@@ -327,12 +443,14 @@ def render_plot(args):
         "runs": [
             {
                 "decomposition": item["decomposition"],
+                "alignment_mode": item["alignment_mode"],
                 "run_dir": str(item["run_dir"]) if item["run_dir"] else None,
                 "metric": item["metric"],
                 "points": len(item["points"]),
                 "errors": item["errors"],
             }
-            for item in series
+            for decomposition in DECOMPOSITIONS
+            for item in series[decomposition]
         ],
     }
     return png, status

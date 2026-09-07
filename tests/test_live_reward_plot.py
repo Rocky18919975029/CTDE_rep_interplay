@@ -75,6 +75,12 @@ class LiveRewardPlotTest(unittest.TestCase):
             "eval_average_episode_rewards/eval_average_episode_rewards",
         )
 
+    def test_comparison_styles_are_distinct(self):
+        baseline = MODULE.method_style("separate", 0)
+        critic_to_actor = MODULE.method_style("critic_to_actor", 1)
+        self.assertEqual(baseline["label"], "HAPPO baseline")
+        self.assertNotEqual(baseline["color"], critic_to_actor["color"])
+
 
 if __name__ == "__main__":
     unittest.main()

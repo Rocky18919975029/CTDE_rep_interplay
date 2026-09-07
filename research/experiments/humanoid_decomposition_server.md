@@ -120,10 +120,13 @@ Per-process stdout/stderr is written under `launch_logs/`.
 
 ## Live eight-panel reward monitor
 
-The live monitor reads HARL's flushed `progress.txt` for the newest matching run
-of every decomposition. In `auto` mode it plots evaluation episode return as
-soon as it exists, and reads TensorBoard's training-return event as an explicit
-fallback before the first evaluation interval.
+The live monitor overlays two methods in every decomposition panel by default:
+orange is the HAPPO baseline (`separate`) and blue is critic-to-actor alignment.
+It reads HARL's flushed `progress.txt` for the newest matching run and compares
+evaluation episode return at the same environment-step coordinates. The x-axis
+uses millions of environment steps in every panel. Optional `auto` mode reads
+TensorBoard's training-return event as a fallback before the first evaluation
+interval.
 
 Install the two plotting dependencies in the experiment environment if needed,
 then start the localhost-only web view in a second `tmux` session:
@@ -134,7 +137,7 @@ python -m pip install matplotlib tensorboard
 tmux new-session -d -s humanoid-rewards \
   'cd ~/CTDE_rep_interplay && conda run -n marl_trpo \
    python scripts/live_plot_humanoid_rewards.py \
-   --seed 1 --alignment-mode critic_to_actor --capacity-mode standard \
+   --seed 1 --capacity-mode standard \
    --refresh-seconds 10 --port 8765'
 ```
 
@@ -145,8 +148,10 @@ On the local computer, forward the monitor port and open
 ssh -N -L 8765:127.0.0.1:8765 zeshenghong@ada4090g1
 ```
 
-Use `--metric eval` to keep panels blank until evaluation results arrive,
+Evaluation return is the default so the two methods always remain comparable.
+Use `--metric auto` to enable a temporary training-return fallback,
 `--metric train` for training returns only, or `--x-axis hours` for elapsed
 wall-clock time instead of environment steps. To create or continually update a
 PNG file, pass `--output results/humanoid_rewards_live.png`; add `--once` to
-write it once and exit.
+write it once and exit. `--alignment-modes` can select another set of methods;
+its default is `separate critic_to_actor`.
