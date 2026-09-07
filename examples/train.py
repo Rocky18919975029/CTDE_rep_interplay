@@ -1,13 +1,31 @@
 
-import harl
 """Train an algorithm."""
+
 import argparse
 import json
-from harl.utils.configs_tools import get_defaults_yaml_args, update_args
+import sys
+from pathlib import Path
+
+# A server environment may still contain an editable install of an older HARL
+# checkout.  Running this source entry point must always use its sibling `harl`
+# package, independent of site-packages/editable-finder ordering.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+repo_root_string = str(REPO_ROOT)
+if sys.path[0] != repo_root_string:
+    sys.path.insert(0, repo_root_string)
+
+import harl
+
+HARL_SOURCE = Path(harl.__file__).resolve()
+if REPO_ROOT not in HARL_SOURCE.parents:
+    raise RuntimeError(
+        f"Imported HARL from {HARL_SOURCE}, expected the checkout at {REPO_ROOT}"
+    )
 
 
 def main():
     """Main function."""
+    print(f"HARL source: {HARL_SOURCE}")
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
@@ -55,6 +73,8 @@ def main():
         help="If set, load existing experiment config file instead of reading from yaml config file.",
     )
     args, unparsed_args = parser.parse_known_args()
+
+    from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 
     def process(arg):
         try:

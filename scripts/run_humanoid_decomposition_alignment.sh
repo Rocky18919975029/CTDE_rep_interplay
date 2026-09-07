@@ -46,7 +46,10 @@ if [[ -n "${USE_EVAL:-}" ]]; then
 fi
 
 cd "$repo_dir"
-exec env CUDA_VISIBLE_DEVICES="$gpu" "$python_bin" examples/train.py \
+exec env \
+    CUDA_VISIBLE_DEVICES="$gpu" \
+    PYTHONPATH="$repo_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python_bin" examples/train.py \
     --load_config "$config_path" \
     --exp_name "$experiment_name" \
     --seed "$seed" \

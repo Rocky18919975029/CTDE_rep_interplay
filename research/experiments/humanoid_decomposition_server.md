@@ -30,6 +30,11 @@ python -m pip install -e .
 python -c "import torch, gym, numpy; print(torch.__version__, gym.__version__, numpy.__version__)"
 ```
 
+The launch script and `examples/train.py` explicitly put this checkout first on
+`PYTHONPATH`. This is important when the Conda environment also contains an
+editable install of an older HARL checkout. Every run prints `HARL source:`; it
+must point inside `/path/to/PRL_New_Paper`, never an older experiment directory.
+
 If your server uses `mujoco_py`, keep the same MuJoCo library and license setup as
 the prior PRL runs. The experiment intentionally targets the existing
 `Humanoid-v2` API rather than migrating to a newer Gym task.
