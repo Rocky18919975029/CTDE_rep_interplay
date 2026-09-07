@@ -25,7 +25,16 @@ build_actions = obsk.build_actions
 get_parts_and_edges = obsk.get_parts_and_edges
 
 
-DECOMPOSITIONS = ["1agent", "3agents", "5agents", "7agents", "11agents", "17x1"]
+DECOMPOSITIONS = [
+    "1agent",
+    "3agents",
+    "5agents",
+    "7agents",
+    "11agents",
+    "13agents",
+    "15agents",
+    "17x1",
+]
 
 
 def actuator_sets(partition):
@@ -34,7 +43,9 @@ def actuator_sets(partition):
 
 class HumanoidDecompositionTest(unittest.TestCase):
     def test_agent_counts_and_complete_action_coverage(self):
-        for label, expected_count in zip(DECOMPOSITIONS, [1, 3, 5, 7, 11, 17]):
+        for label, expected_count in zip(
+            DECOMPOSITIONS, [1, 3, 5, 7, 11, 13, 15, 17]
+        ):
             partition, _, _ = get_parts_and_edges("Humanoid-v2", label)
             self.assertEqual(len(partition), expected_count)
             actuator_ids = [

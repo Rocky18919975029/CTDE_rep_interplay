@@ -6,7 +6,7 @@ Under a fixed Humanoid-v2 physical system, does asymmetric critic-to-actor
 representation alignment become more useful as the same 17-dimensional action
 space is split among more independently optimized actors?
 
-The confirmatory trend comparison uses six nested decompositions and five model
+The confirmatory trend comparison uses eight nested decompositions and five model
 interactions. `no_stop` is an optional diagnostic and is not part of the primary
 five-way comparison.
 
@@ -34,7 +34,9 @@ experiment. Different policy heads have their true action dimension.
 | `5agents` | 5 | core; right leg; left leg; right arm; left arm |
 | `7agents` | 7 | core; right hip; right knee; left hip; left knee; right arm; left arm |
 | `11agents` | 11 | three core joints; right hip; right knee; left hip; left knee; right shoulder; right elbow; left shoulder; left elbow |
-| `17x1` | 17 | one physical actuator per actor |
+| `13agents` | 13 | 11-agent groups with both shoulder pairs split into individual joints |
+| `15agents` | 15 | 13-agent groups with each hip triplet split symmetrically into hip-x and hip-y/z |
+| `17x1` | 17 | 15-agent groups with both hip-y/z pairs split; one physical actuator per actor |
 
 Each group at a finer level is a subset of exactly one group at the preceding
 level. The group ordering is not used as MuJoCo action ordering: actions are
@@ -84,7 +86,7 @@ different practical regime even when total capacity is equal.
 
 - Confirmatory modes: `separate`, `hard_share`, `critic_to_actor`,
   `actor_to_critic`, and `bidirectional`.
-- Decompositions: 1, 3, 5, 7, 11, and 17 actors.
+- Decompositions: 1, 3, 5, 7, 11, 13, 15, and 17 actors.
 - Capacity modes: `standard` and `matched`.
 - Matched seeds: 1, 2, 3, 4, and 5.
 - Optional diagnostic: repeat the grid with `no_stop` only after the primary grid

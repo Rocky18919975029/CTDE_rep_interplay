@@ -5,7 +5,16 @@ import argparse
 import shlex
 
 
-DECOMPOSITIONS = ["1agent", "3agents", "5agents", "7agents", "11agents", "17x1"]
+DECOMPOSITIONS = [
+    "1agent",
+    "3agents",
+    "5agents",
+    "7agents",
+    "11agents",
+    "13agents",
+    "15agents",
+    "17x1",
+]
 ALIGNMENT_MODES = [
     "separate",
     "hard_share",

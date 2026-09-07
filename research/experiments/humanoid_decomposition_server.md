@@ -75,7 +75,7 @@ Single run, with the final argument selecting the visible GPU:
   1 7agents critic_to_actor matched 0
 ```
 
-Generate the 300-command primary grid (6 decompositions × 5 modes × 2 capacity
+Generate the 400-command primary grid (8 decompositions × 5 modes × 2 capacity
 conditions × 5 seeds):
 
 ```bash
@@ -96,3 +96,24 @@ Results are rooted at `results/humanoid_decomposition_alignment/mamujoco/`.
 Every run name includes decomposition, alignment mode, and capacity mode; HARL's
 result path additionally records seed and timestamp. Preserve the generated
 `config.json`, TensorBoard logs, `training_time.txt`, and checkpoints together.
+
+## Four-GPU, eight-granularity same-seed launch
+
+Run all eight decompositions concurrently, with two processes on each GPU. Coarse
+and fine decompositions are paired so each GPU carries 18 actor networks:
+
+```bash
+./scripts/launch_humanoid_eight_granularities.sh \
+  1 critic_to_actor standard
+```
+
+The mapping is GPU 0 = 1+17, GPU 1 = 3+15, GPU 2 = 5+13, and GPU 3 = 7+11.
+
+Run it inside `tmux` so an SSH disconnect does not terminate the jobs:
+
+```bash
+tmux new-session -d -s humanoid-s1-c2a \
+  './scripts/launch_humanoid_eight_granularities.sh 1 critic_to_actor standard'
+```
+
+Per-process stdout/stderr is written under `launch_logs/`.

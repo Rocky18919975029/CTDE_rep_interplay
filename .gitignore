@@ -19,6 +19,7 @@ runs/
 wandb/
 checkpoints/
 artifacts/
+launch_logs/
 *.pt
 *.pth
 *.ckpt
@@ -33,4 +34,3 @@ paper/*.out
 
 .idea/
 .vscode/
-

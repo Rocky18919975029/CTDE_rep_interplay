@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 4 || $# -gt 5 ]]; then
     echo "usage: $0 SEED DECOMPOSITION ALIGNMENT_MODE CAPACITY_MODE [GPU]" >&2
-    echo "decomposition: 1agent|3agents|5agents|7agents|11agents|17x1" >&2
+    echo "decomposition: 1agent|3agents|5agents|7agents|11agents|13agents|15agents|17x1" >&2
     echo "alignment: separate|hard_share|critic_to_actor|actor_to_critic|bidirectional|no_stop" >&2
     echo "capacity: standard|matched" >&2
     exit 2
@@ -16,7 +16,7 @@ capacity_mode="$4"
 gpu="${5:-0}"
 
 case "$decomposition" in
-    1agent|3agents|5agents|7agents|11agents|17x1) ;;
+    1agent|3agents|5agents|7agents|11agents|13agents|15agents|17x1) ;;
     *) echo "invalid decomposition: $decomposition" >&2; exit 2 ;;
 esac
 case "$alignment_mode" in

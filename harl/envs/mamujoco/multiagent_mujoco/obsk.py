@@ -498,7 +498,7 @@ def get_parts_and_edges(label, partitioning):
         globals = {}
 
         # The experiment partitions form a strictly nested refinement lattice:
-        # 1 -> 3 -> 5 -> 7 -> 11 -> 17 agents.  Thus increasing granularity only
+        # 1 -> 3 -> 5 -> 7 -> 11 -> 13 -> 15 -> 17 agents.  Thus refinement only
         # splits an existing anatomical group; it never moves a joint between two
         # otherwise unchanged groups.
         core = (abdomen_x, abdomen_y, abdomen_z)
@@ -541,6 +541,40 @@ def get_parts_and_edges(label, partitioning):
                 right_shoulder,
                 (right_elbow,),
                 left_shoulder,
+                (left_elbow,),
+            )
+        elif partitioning == "13agents":
+            parts = (
+                (abdomen_x,),
+                (abdomen_y,),
+                (abdomen_z,),
+                right_hip,
+                (right_knee,),
+                left_hip,
+                (left_knee,),
+                (right_shoulder1,),
+                (right_shoulder2,),
+                (right_elbow,),
+                (left_shoulder1,),
+                (left_shoulder2,),
+                (left_elbow,),
+            )
+        elif partitioning == "15agents":
+            parts = (
+                (abdomen_x,),
+                (abdomen_y,),
+                (abdomen_z,),
+                (right_hip_x,),
+                (right_hip_y, right_hip_z),
+                (right_knee,),
+                (left_hip_x,),
+                (left_hip_y, left_hip_z),
+                (left_knee,),
+                (right_shoulder1,),
+                (right_shoulder2,),
+                (right_elbow,),
+                (left_shoulder1,),
+                (left_shoulder2,),
                 (left_elbow,),
             )
         elif partitioning == "17agents":
