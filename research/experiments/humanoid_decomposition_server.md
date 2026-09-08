@@ -122,9 +122,12 @@ Per-process stdout/stderr is written under `launch_logs/`.
 
 The live monitor overlays two methods in every decomposition panel by default:
 orange is the HAPPO baseline (`separate`) and blue is critic-to-actor alignment.
-It reads HARL's flushed `progress.txt` for the newest matching run and compares
-evaluation episode return at the same environment-step coordinates. The x-axis
-uses millions of environment steps in every panel. Optional `auto` mode reads
+It selects the newest matching run independently for every decomposition and
+method. Consequently, completed 1-agent and 3-agent runs remain visible while
+new 5--17-agent reruns update live. It reads HARL's flushed `progress.txt` and
+compares evaluation episode return at the same environment-step coordinates.
+Every panel uses the common 0--10 million-step x-axis, so a partial live curve
+cannot look artificially as long as a completed curve. Optional `auto` mode reads
 TensorBoard's training-return event as a fallback before the first evaluation
 interval.
 

@@ -49,6 +49,35 @@ class LiveRewardPlotTest(unittest.TestCase):
             )
             self.assertIsNone(actual)
 
+    def test_completed_and_live_decompositions_are_selected_independently(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            completed = (
+                root
+                / "Humanoid-v2-1agent"
+                / "happo"
+                / "humanoid_1agent_separate_standard"
+                / "seed-00001-2026-09-07-10-00-00"
+            )
+            live = (
+                root
+                / "Humanoid-v2-5agents"
+                / "happo"
+                / "humanoid_5agents_separate_standard"
+                / "seed-00001-2026-09-08-19-40-30"
+            )
+            completed.mkdir(parents=True)
+            live.mkdir(parents=True)
+
+            self.assertEqual(
+                MODULE.find_latest_run(root, "1agent", 1, "separate", "standard"),
+                completed,
+            )
+            self.assertEqual(
+                MODULE.find_latest_run(root, "5agents", 1, "separate", "standard"),
+                live,
+            )
+
     def test_moving_average(self):
         self.assertEqual(MODULE.moving_average([1.0, 3.0, 8.0], 2), [1.0, 2.0, 5.5])
 

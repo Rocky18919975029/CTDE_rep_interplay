@@ -80,6 +80,15 @@ def parse_args():
     )
     parser.add_argument("--capacity-mode", default="standard")
     parser.add_argument(
+        "--total-env-steps",
+        type=int,
+        default=10_000_000,
+        help=(
+            "planned training horizon used for a common x-axis across completed "
+            "and live runs (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--metric",
         choices=("auto", "eval", "train"),
         default="eval",
@@ -116,6 +125,8 @@ def parse_args():
         parser.error("--refresh-seconds must be positive")
     if args.smooth_window <= 0:
         parser.error("--smooth-window must be positive")
+    if args.total_env_steps <= 0:
+        parser.error("--total-env-steps must be positive")
     if args.once and args.output is None:
         parser.error("--once requires --output")
     # Backward compatibility with commands issued before multi-method plotting.
@@ -433,6 +444,11 @@ def render_plot(args):
                 if args.x_axis == "hours"
                 else "Environment steps (millions)"
             )
+        if args.x_axis == "steps":
+            # A fixed horizon makes partial live curves directly comparable with
+            # the already-completed runs instead of autoscaling every panel to a
+            # different apparent amount of training.
+            axis.set_xlim(0.0, args.total_env_steps / 1_000_000.0)
 
     buffer = io.BytesIO()
     figure.savefig(buffer, format="png", dpi=120, bbox_inches="tight")
